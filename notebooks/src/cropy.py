@@ -21,7 +21,7 @@ warnings.filterwarnings("ignore")
 class VectorProcessing():
     '''
     Burada isleme gore girdiler tanimlayabiliriz. ilk methodlarimiz hedef alani harita uzerinde gosterme
-    ve sentine_tile ile cakistirma yaparak, hangi sentinel tile ID ler ile kesistigini gosteriyorz
+    ve sentine_tile ile cakistirma yaparak, hangi sentinel tile ID ler ile kesistigini gosteriyorz.
     '''
     def __init__(self,target_area,):
         #target_area tipine gore girdimizi tanimliyoruz
@@ -87,6 +87,7 @@ class Stac():
     bands_list=['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A',
            'B09', 'B11', 'B12', 'AOT', 'WVP', 'SCL', 'info', 'metadata',
            'visual', 'overview', 'thumbnail']
+    #https://sentinels.copernicus.eu/web/sentinel/technical-guides/sentinel-2-msi/level-2a/algorithm
 
     def __init__(self,target_aoi,date,max_cloud=10):
         self.target_aoi=target_aoi
@@ -102,7 +103,6 @@ class Stac():
         self.stac_items=self.stac_result.items()
         self.tiles_list=[]
         self.min_coverage=95
-        self.max_cloud=2
 
     def create_tiles_list(self):
         items = self.stac_result.items()
@@ -279,9 +279,9 @@ class Stac():
         if target_area is not None:
             if isinstance(target_area,dict):
                 datajson=json.dumps(target_area)
-                self.target_area=gpd.read_file(datajson)
+                target_area=gpd.read_file(datajson)
             elif isinstance(target_area,gpd.geodataframe.GeoDataFrame):
-                self.target_area=target_area
+                target_area=target_area
             else:
                 raise DataError
             geo=target_area.__geo_interface__
@@ -347,8 +347,10 @@ class Stac():
     @staticmethod
     def download_error_image(img_date,geo_img,img_id,username,password):
         '''
-        After read error file you can get image info which you failed from COG Sentinel-2, you can use this info with this function
-        if you have more than 1 image, you can download with for loop
+        After read error file(image_error.txt) you can get image info which you failed from COG Sentinel-2, you can use this info with this function
+        if you have more than 1 image, you can download with for loop.
+
+        You can find img_date, geo_img and img_id information in image_error.txt file.
 
         api,target_image_id=download_error_image(img_date,geo_img,img_id,username,password)
         api.download(target_image_id,directory_path='.')
@@ -381,13 +383,13 @@ class Stac():
                     item.download(band,filename_template=download_path+'/'+name_suffix)
             except:
                 txt=f'image_id:{item.properties["sentinel:product_id"]},geometry:{item.geometry},date:{item.date} \n'
-                __create_log_file(target_text=txt,filename=download_path+'/image_error.txt')
+                __create_log_file(target_text=txt,filename=download_path+f'/image_error_{item.id}.txt')
                 continue
         
         return download_path
 
     @staticmethod
-    def download_image(stac_result=None,item_id_list=[],item_list=[] ,band_list=bands_list[:-5],download_path='./sentinel_cog',name_suffix='',auto_folder=True):
+    def download_image(stac_result=None,item_id_list=[],item_list=[] ,band_list=bands_list[:-7],download_path='./sentinel_cog',name_suffix='',auto_folder=True):
         """
         There are 3 different download methods in this function. If you don't give any band list, function use default band list.
 
@@ -396,7 +398,7 @@ class Stac():
         3- If you just give the stac result to this function, function download all images in your stac result with default bands. According your time range
         and target area, this method could take more time.
         default_bands=['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A',
-           'B09', 'B11', 'B12', 'AOT', 'WVP']
+           'B09', 'B11', 'B12']
         defautl download path > './sentinel_cog'
         """
         if auto_folder:
@@ -432,7 +434,12 @@ class Stac():
                 img_name=item.properties['sentinel:product_id']
                 bands_dict['image_name']=img_name
                 band_url=item.assets[band]['href']
-                rds = rioxarray.open_rasterio(band_url, masked=True, chunks=(1, "auto", -1))
+                try:
+                    rds = rioxarray.open_rasterio(band_url, masked=True, chunks=(1, "auto", -1))
+                except:
+                    txt=f'image_id:{item.properties["sentinel:product_id"]},geometry:{item.geometry},date:{item.date} \n'
+                    __create_log_file(target_text=txt,filename=download_path+f'/image_error_{item.id}.txt')
+                    continue
                 #aoi data from http://geojson.io 
                 # get aoi as geopandas df
                 datajson=json.dumps(aoi)
@@ -462,9 +469,9 @@ class Stac():
                             download_path='./sentinel_cog'):
         '''
         With this function, you can get subset data from your Stac items.You can get data as xarray that you can convert numpy array and use
-        in other function. Also you can directly save the subset image with these parameters >> download_status=True and download_path='your_target_path'
+        in another function. Also you can directly save the subset image with these parameters >> download_status=True and download_path='your_target_path'
 
-        There are 3 different download methods in this function. If you don't give any band list, function use default band list.
+        There are 3 different download methods in this function. Also, If you don't give any band list, function use default band list.
 
         1- Use item_list from "stac_result.find_sentinel_item()" method
         2- Use stac result and Sentinel image ID which you can get from show_result_df or show_result_list methods
@@ -472,7 +479,7 @@ class Stac():
         and target area, this method could take more time.
 
         default_bands=['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A',
-           'B09', 'B11', 'B12', 'AOT', 'WVP']
+           'B09', 'B11', 'B12']
         defautl download path > './sentinel_cog'
         '''
 

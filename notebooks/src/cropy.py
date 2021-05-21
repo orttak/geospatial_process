@@ -17,6 +17,13 @@ from datetime import date
 import datetime
 warnings.filterwarnings("ignore")
 
+#https://nbviewer.jupyter.org/github/pangeo-data/cog-best-practices/blob/main/0-single-cog.ipynb
+import os
+os.environ['GDAL_DISABLE_READDIR_ON_OPEN']='EMPTY_DIR' #This is KEY! otherwise we send a bunch of HTTP GET requests to test for common sidecar metadata
+os.environ['AWS_NO_SIGN_REQUEST']='YES' #Since this is a public bucket, we don't need authentication
+os.environ['GDAL_MAX_RAW_BLOCK_CACHE_SIZE']='8000000000'  #200MB: Want this to be greater than size of uncompressed raster to overcome a 10 MB limit in the GeoTIFF driver for range request merging.
+os.environ['GDAL_SWATH_SIZE']='8000000000'  #also increase this if increasing MAX_RAW_BLOCK_CACHE_SIZE
+os.environ['VSI_CURL_CACHE_SIZE']='8000000000' #also increase this if increasing MAX_RAW_BLOCK_CACHE_SIZE8
 
 class VectorProcessing():
     '''
@@ -112,7 +119,23 @@ class Stac():
         df['tile']=df.apply(lambda row: str(row['sentinel:utm_zone'])+row['sentinel:latitude_band']+row['sentinel:grid_square'], axis=1)
         self.tiles_list = sorted(df['tile'].unique().tolist())
         return self.tiles_list    
-   
+    
+#### denemeeeeeeeeeeeeeeeeeeeeeeeeeee yapppppppppppppppp
+    def find_time_series(self):
+        if not self.tiles_list:
+            self.create_tiles_list()
+        tile_number_list=[]
+        lat_band_list=[]
+        grid_sq_list=[]
+        for tile in self.tiles_list:            
+            tile_number_list.append(int(tile[0:2]))
+            lat_band_list.append(tile[2])
+            grid_sq_list.append(tile[3:])
+        self.stac_items.filter('sentinel:utm_zone',tile_number_list)
+        self.stac_items.filter('sentinel:latitude_band',lat_band_list)
+        self.stac_items.filter('sentinel:grid_square', grid_sq_list)   
+
+
     # __ (2*_) hidden method
     def __find_best_image(self):
         tile_result_list=[]
@@ -233,7 +256,7 @@ class Stac():
         return result_list
 
     @staticmethod
-    def show_result_df(result=None,items_list=[]):
+    def show_result_df(result=None,sentinel_items_list=[]):
         '''
         This method return pandas dataframe of your stac result or your items list
         df=stac_result.show_result_df(result=stac_result.stac_result) 
@@ -242,7 +265,7 @@ class Stac():
         '''
         # this function return stac result as a pandas dataframe
         # item_list come from find_sentinel_item() function
-        if not items_list:
+        if not sentinel_items_list:
             # if you want to see all result from main stac result(find_stac_result function)
             # you can use this method
             items = result.items()
@@ -258,7 +281,7 @@ class Stac():
 
             #create empty df
             df=gpd.GeoDataFrame()
-            for item in items_list:
+            for item in sentinel_items_list:
                 #get item properties as a json
                 items_json=item.properties
                 tmp=gpd.GeoDataFrame(items_json)
@@ -273,7 +296,7 @@ class Stac():
             return df
     @staticmethod       
     def __add_map(items,target_area=None,overview=False):
-        center = [38,35]
+        center = items[0].geometry['coordinates'][0][0]
         zoom = 6
         m = folium.Map(location=center, zoom_start=zoom)
         if target_area is not None:
@@ -435,7 +458,7 @@ class Stac():
                 bands_dict['image_name']=img_name
                 band_url=item.assets[band]['href']
                 try:
-                    rds = rioxarray.open_rasterio(band_url, masked=True, chunks=(1, "auto", -1))
+                    rds = rioxarray.open_rasterio(band_url, masked=False, chunks=(1, "auto", -1))
                 except:
                     txt=f'image_id:{item.properties["sentinel:product_id"]},geometry:{item.geometry},date:{item.date} \n'
                     __create_log_file(target_text=txt,filename=download_path+f'/image_error_{item.id}.txt')
@@ -452,6 +475,8 @@ class Stac():
                     clipped = clipped.rio.reproject(target_epsg)
                 if download_status:
                     img_path=download_path+'/'+img_name
+                    if not os.path.isdir(download_path):
+                        os.mkdir(download_path)                        
                     if not os.path.isdir(img_path):
                         os.mkdir(img_path)
                     img_name=band+'_subset.tif'
@@ -459,6 +484,9 @@ class Stac():
                 band_clipped=clipped.copy()
                 bands_dict[band]=band_clipped
                 rds=None
+            ################### FEATURE #######################
+            #clipped image could be none to avoid high memory usage. we should write test about it and then put new variables 
+            #for manage the clipped image
             result_list.append(bands_dict)
         return result_list
 
@@ -505,3 +533,236 @@ class Stac():
             aoi=aoi,target_epsg=target_epsg,band_list=band_list,
                             download_path=download_path)
             return result_list
+
+import numpy as np
+import xarray as xr
+
+def xarray_calc_stats(dataset,method,dim_name,input_nodata,input_dtype):
+    dataset=dataset.astype(np.float64)
+    #define nodata as np>nan to ignore nodata calculating statistic
+    dataset.rio.write_nodata(np.nan, inplace=True)
+    if method=='mean':
+        dataset_mean = dataset.mean(dim=dim_name,skipna=True).compute()
+        dataset_mean=dataset_mean.rio.write_nodata(input_nodata, inplace=True)
+        dataset_mean=dataset_mean.astype(input_dtype)
+        return dataset_mean
+
+    elif method=='median':
+        dataset_median = dataset.median(dim=dim_name,skipna=True).compute()
+        dataset_median=dataset_median.astype(input_dtype)
+        dataset_median.rio.write_nodata(input_nodata, inplace=True)
+        return dataset_median
+
+    elif method=='min':
+        dataset_min = dataset.min(dim=dim_name,skipna=True).compute()
+        dataset_min=dataset_min.astype(input_dtype)
+        dataset_min.rio.write_nodata(input_nodata, inplace=True)
+        return dataset_min
+
+    elif method=='max':
+        dataset_max = dataset.max(dim=dim_name,skipna=True).compute()
+        dataset_max=dataset_max.astype(input_dtype)
+        dataset_max.rio.write_nodata(input_nodata, inplace=True)
+        return dataset_max
+
+def open_image(input_img):
+    rds = rioxarray.open_rasterio(input_img, masked=False, chunks=(1, "auto", -1))
+    return rds
+
+def calc_img_stat(stac_result:list =[],imgs_list:list=[],numberOfBand:list=[],inputtarget_epsg: str ='epsg:4326',statistic_method: str = 'mean',input_dim_name: str='band',output_dim_name: str='band',input_nodata:int=None,input_dtype=None):
+    '''
+    With this function, you can calculate mean,median, min and max values for list of images. If you don't define a numberOfBand list for stac_result, 
+    the system calculate all band in your images list.
+
+    You can use as input:
+    > Result of download_subset_image result (from stac_query.download_subset_image)
+    > If you use download_subset_image, you can get stats_result of each band as dictionary.
+    
+    From your local directory, you can give tif path as a list or before read with rioxarray and give that list
+    > list of tif files
+    > list of xarray Dataarray
+    
+    Methods
+    > mean,median, min and max
+    > statistic_method = 'mean' #default value is mean
+    
+    Input and output dim names are importan to stack the data, Algorithm use this variable.
+    >input_dim_name='band' #default value
+    >output_dim_name='time' #default value
+    
+    You can define input dtype or system read from first image of your list.
+    >input_dtype= np.uint16   # it shoud be numpy dtype data
+
+    Above methods, you can get statistic result of input images
+    '''
+           
+    if stac_result:
+        numberOfImages=len(stac_result)
+        if not numberOfBand:
+            numberOfBand=list(stac_result[0].keys())[1:]
+        
+        if input_nodata:
+            input_nodata=input_nodata     
+        else:
+            target_img=stac_result[0][numberOfBand[0]]
+            input_nodata=target_img.rio.nodata
+
+        if not input_dtype:
+            input_dtype=stac_result[0][numberOfBand[0]].dtype
+
+        
+        band_dict={}
+        for band in numberOfBand:
+            band_list=[]
+            for img in stac_result:
+                band_list.append(img[band])
+            stack_bands = xr.concat(band_list, dim=input_dim_name, join='outer' ).rename(band=output_dim_name)
+            stats_result=xarray_calc_stats(stack_bands,statistic_method,output_dim_name,input_nodata,input_dtype)
+            band_dict[band]=stats_result
+        return band_dict
+
+    else:
+        if type(imgs_list[0])!=str:
+            stack_bands = xr.concat(imgs_list, dim=input_dim_name, join='outer' ).rename(band=output_dim_name)
+            if input_nodata:
+                input_nodata=input_nodata     
+            else:
+                target_img=imgs_list[0]
+                input_nodata=target_img.rio.nodata 
+            
+            if not input_dtype:
+                input_dtype=imgs_list[0].dtype
+
+            stats_result=xarray_calc_stats(stack_bands,statistic_method,output_dim_name,input_nodata,input_dtype)
+            return stats_result
+        else:
+            input_imgs_list=[open_image(img) for img in imgs_list]
+
+            if input_nodata:
+                input_nodata=input_nodata     
+            else:
+                target_img=input_imgs_list[0]
+                input_nodata=target_img.rio.nodata
+
+            if not input_dtype:
+                input_dtype=input_imgs_list[0].dtype 
+            stack_bands = xr.concat(input_imgs_list, dim=input_dim_name, join='outer' ).rename(band=output_dim_name)
+            stats_result=xarray_calc_stats(stack_bands,statistic_method,output_dim_name,input_nodata,input_dtype)
+            return stats_result
+
+def control_crs(imgs_list:list):
+    unmatched_list=[]
+    base_img=imgs_list[0]
+    for i in range(len(imgs_list[1:])):
+        if base_img.rio.crs!=imgs_list[i+1]:
+            unmatched_list.append(i+1)
+    return unmatched_list
+
+from rioxarray.merge import merge_arrays
+
+
+def create_stack(stac_result:list =[],imgs_list:list=[],numberOfBand:list=[],inputtarget_epsg: str ='epsg:4326',input_dim_name: str='band',output_dim_name: str='band',input_nodata:int=None):
+    '''
+    With this function, you can create stack image from your list. If you don't define a numberOfBand list, the system calculate all band in your images list.
+    You can use as input:
+    > result of download_subset_image result
+    If you use download_subset_image, you can get stats_result of each band as dictionary.
+
+    > list of tif files
+    > list of xarray Dataarray
+    
+    Above methods, you can get statistic result of input images
+    '''
+    
+    if stac_result:
+        numberOfImages=len(stac_result)
+        if not numberOfBand:
+            numberOfBand=list(stac_result[0].keys())[1:]
+        
+        if input_nodata:
+            input_nodata=input_nodata     
+        else:
+            target_img=stac_result[0][numberOfBand[0]]
+            input_nodata=target_img.rio.nodata
+        
+        band_dict={}
+        for band in numberOfBand:
+            band_list=[]
+            for img in stac_result:
+                band_list.append(img[band])
+            stack_bands = xr.concat(band_list, dim=input_dim_name, join='outer').rename(band=output_dim_name)
+            stack_bands=stack_bands.rio.write_nodata(input_nodata, inplace=True)
+            band_dict[band]=stack_bands
+        return band_dict
+
+    else:
+        if type(imgs_list[0])!=str:
+            if input_nodata:
+                input_nodata=input_nodata     
+            else:
+                target_img=imgs_list[0]
+                input_nodata=target_img.rio.nodata 
+            stack_bands = xr.concat(imgs_list, dim=input_dim_name, join='outer' ).rename(band=output_dim_name)
+            stack_bands=stack_bands.rio.write_nodata(input_nodata, inplace=True)
+            return stack_bands
+        else:
+            input_imgs_list=[open_image(img) for img in imgs_list]
+            
+            if input_nodata:
+                input_nodata=input_nodata     
+            else:
+                target_img=input_imgs_list[0]
+                input_nodata=target_img.rio.nodata
+
+            stack_bands = xr.concat(input_imgs_list, dim=input_dim_name, join='outer' ).rename(band=output_dim_name)
+            stack_bands=stack_bands.rio.write_nodata(input_nodata, inplace=True)
+            return stack_bands
+
+
+def create_mosaic(imgs_list:list,reproject=False,target_epsg:str='EPSG:4326',):
+    '''
+    With this function, you can create mosaic image from images list. You can give image path or xarray object read data before use this function.
+    If you define reproject=True, system automatically convert all images into epsg:4326 and mosaic them.
+    If you don't define reproject behaviour, system will controll your epsg code according to first image of your list.
+    If the next images do not match the base image, they convert to hte base image epsg. Be careful when you work with UTM system
+
+    imgs_list= ['target_path3/S2A_MSIL2A_20181030T081041_N0209_R078_T37SDA_20181030T091317/B02_subset.tif',
+    'target_path3/S2A_MSIL2A_20181030T081041_N0209_R078_T37SDA_20181030T091317/B03_subset.tif',
+    'target_path3/S2A_MSIL2A_20181030T081041_N0209_R078_T37SDA_20181030T091317/B04_subset.tif',]
+    '''
+    if type(imgs_list[0])==str:
+            imgs_list=[open_image(img) for img in imgs_list]
+    if reproject:
+        reprojected_list=[]
+        for img in imgs_list:
+            xds_lonlat = img.rio.reproject("EPSG:4326")
+            reprojected_list.append(xds_lonlat)
+            # 0 olan yani nodata lar birlestirirken ne yapiyor kontrol etmek gerekiyor
+        merged = merge_arrays(reprojected_list)
+        return merged
+
+    base_img=imgs_list[0]
+    for i in range(len(imgs_list)-1):
+        if base_img.rio.crs!=imgs_list[i+1].rio.crs:
+            reproject_img=imgs_list[i+1]
+            reproject_img=reproject_img.rio.reproject_match(base_img)
+            imgs_list[i+1]=reproject_img
+    
+    merged = merge_arrays(imgs_list)
+    return merged
+
+def save_image(input_xarray=None,target_path='target_name.tif',data_type='uint16',nodata_value=0):
+    input_xarray.rio.to_raster(target_path,dtype=data_type,tags={'_FillValue': nodata_value})
+    return target_path
+
+'''
+concat icin bir tane stack function yazilabilir
+
+merge yani mosaic icin fonksiyon yazacaz. girdi olarak verilenleri CRS kontrolu yapilacak. eger CRS uymayan varsa
+tum goruntuleri 4326 mi yapmak lazim yoksa once kullanciya bir uyari mi donmek lazim. Kullaniciya bir kontrol fonksiyonu tanimlayip mosaic lemeden once goruntu
+CRS icin bir kontrol yapmasini onerebiliriz. Eger buna ragmen mosaiclemek istiyorsa target epsg yi belirtmeli.yoksa 4326 defaul olarak alacaz
+
+bu kontrol fonksiyonu true/false donse guzel olur ama kullanici hangi goruntu farklilik yaratiyor donsekte iyi olabilir. birini gizli fonksiyon digerini kullanici gorsun diye acik sekilde yapabiliriz.
+bun ne kadar dogru bir soralim.
+
+'''
